@@ -1,0 +1,89 @@
+# Development files
+
+.env
+.env.local
+.env._.local
+venv/
+.venv/
+**pycache**/
+_.pyc
+_.pyo
+_.pyd
+.Python
+
+# Development scripts
+
+setup.ps1
+server.ps1
+start_server.bat
+build_test.py
+
+# Documentation and README files
+
+README.md
+\*.md
+
+# IDE and editor files
+
+.vscode/
+.idea/
+_.swp
+_.swo
+
+# OS files
+
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Test files
+
+test\__.py
+_\_test.py
+tests/
+
+# Temporary files
+
+uploads/
+_.xlsx
+_.xls
+temp*\*
+temporary*\*
+\*.tmp
+.tmp/
+
+# Log files
+
+\*.log
+logs/
+
+# Git files
+
+.git/
+.gitignore
+
+# Cache directories
+
+.cache/
+.pytest_cache/
+
+# Build artifacts
+
+build/
+dist/
+\*.egg-info/
+
+# Documentation
+
+docs/
+\*.rst
+
+# Configuration files that shouldn't be deployed
+
+.vercelignore
+
+# Backup files
+
+_.bak
+_.backup
+\*.old
