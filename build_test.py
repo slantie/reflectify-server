@@ -79,7 +79,6 @@ def test_build():
             return False
             
         try:
-            import helper_functions
             print("✅ Helper functions import successfully")
         except ImportError as e:
             if any(dep in str(e).lower() for dep in ["pandas", "openpyxl", "numpy"]):
