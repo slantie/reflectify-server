@@ -48,6 +48,18 @@ def extract_sheet_data(workbook: openpyxl.workbook.workbook.Workbook, sheet_name
         
     header_row_values = data_frame.iloc[header_index]
     
+    # Clean the header row values
+    for idx, name in enumerate(header_row_values):
+        if isinstance(name, str) and re.match(r'^L\d+$', name):
+            # Remove the column as well
+            data_frame.drop(columns=[name], inplace=True, errors='ignore')
+            header_row_values[idx] = None
+            continue
+
+        if isinstance(name, str) and "/" in name:
+            name_parts = name.split('/')
+            header_row_values[idx] = name_parts[0].replace(' ', '').strip()
+    
     # Trim columns based on header row NaN values
     first_unwanted_col_index = -1
     for i, col_value in enumerate(header_row_values):
@@ -68,49 +80,58 @@ def extract_sheet_data(workbook: openpyxl.workbook.workbook.Workbook, sheet_name
     return data_frame
 
 def extract_subject_details(subject_string: str) -> Optional[Dict[str, Any]]:
-    """Parses subject string into components: subject_code, semester, and division_batches."""
-    # Validate input and filter tutorials
     if not isinstance(subject_string, str) or not subject_string.strip() or 'TUT' in subject_string.upper():
         return None
 
-    # Split into subject code and class info
-    parts = subject_string.strip().split(maxsplit=1)
-    if len(parts) < 2:
-        return None
+    # Remove parenthesis content like "(HJP)", "(TNG)", etc.
+    subject_string = re.sub(r'\(.*?\)', '', subject_string).strip()
 
-    subject_code = parts[0]
-    class_info = parts[1]
-    
-    semester: Optional[int] = None
+    # Tokenize by whitespace
+    tokens = subject_string.strip().split()
+    if not tokens:
+        return {"error": f"Empty subject string: {subject_string}"}
+
+    subject_code = None
+    semester = None
+    division_info = []
+
+    # Step 1: Identify semester (first integer found)
+    for token in tokens:
+        if re.match(r'^\d+$', token):  # pure integer
+            semester = int(token)
+            continue
+
+    if not semester:
+        # Try matching like "7A1/B2"
+        for token in tokens:
+            sem_match = re.match(r'^(\d+)[A-Z]', token, re.IGNORECASE)
+            if sem_match:
+                semester = int(sem_match.group(1))
+                break
+
+    if not semester:
+        return {"error": f"Semester not found in: {subject_string}"}
+
+    # Step 2: Identify subject code (all alphabets, usually 2-4 letters)
+    for token in tokens:
+        if re.match(r'^[A-Z]{2,5}$', token, re.IGNORECASE):
+            subject_code = token.strip().upper()
+            break
+
+    if not subject_code:
+        return {"error": f"Subject code not found in: {subject_string}"}
+
+    # Step 3: Extract remaining segment for division and batch
+    # Remove semester and subject_code from tokens
+    remaining_tokens = [t for t in tokens if t not in [str(semester), subject_code]]
+    division_string = ''.join(remaining_tokens).replace(' ', '')  # merge like "A1/B2"
+
     division_batches: List[Dict[str, Optional[str]]] = []
 
-    # Extract semester from leading digits
-    semester_match = re.match(r'^(\d+)', class_info)
-    if semester_match:
-        semester = int(semester_match.group(1))
-        class_info_without_semester = class_info[semester_match.end():]
-    else:
-        # Retry with reverse parts
-        parts.reverse()
-
-        if len(parts) < 2:
-            return None
-
-        subject_code = parts[0]
-        class_info = parts[1]
-        semester_match = re.match(r'^(\d+)', class_info)
-
-        if semester_match:
-            semester = int(semester_match.group(1))
-            class_info_without_semester = class_info[semester_match.end():]
-        else:
-            return None
-
-    # Process divisions and batches
-    if 'ALL' in class_info_without_semester.upper():
+    if 'ALL' in division_string.upper():
         division_batches = [{'division': 'ALL', 'batch': None}]
     else:
-        division_segments = class_info_without_semester.split('/')
+        division_segments = division_string.split('/')
 
         for segment in division_segments:
             division_letter = ''.join(char for char in segment if char.isalpha()).strip()
@@ -123,7 +144,7 @@ def extract_subject_details(subject_string: str) -> Optional[Dict[str, Any]]:
             if division_letter:
                 division_batches.append({'division': division_letter, 'batch': batch_value})
 
-    # Remove duplicates and sort unless 'ALL' division
+    # Remove duplicates
     if not division_batches or division_batches[0].get('division') != 'ALL':
         unique_division_batches: List[Dict[str, Optional[str]]] = []
         seen_tuples: Set[tuple] = set()
@@ -138,7 +159,7 @@ def extract_subject_details(subject_string: str) -> Optional[Dict[str, Any]]:
     return {
         'subject_code': subject_code,
         'semester': semester,
-        'division_batches': division_batches,
+        'division_batches': division_batches
     }
 
 def build_faculty_schedules(processed_data_frame: pd.DataFrame) -> Dict[str, Dict[str, List[Dict[str, Any]]]]:
@@ -159,7 +180,7 @@ def build_faculty_schedules(processed_data_frame: pd.DataFrame) -> Dict[str, Dic
     faculty_names = [
         col for col in processed_data_frame.columns[2:]
     ]
-
+    
     # Initialize empty schedule for each faculty
     for faculty in faculty_names:
         faculty_master[faculty] = {
@@ -277,10 +298,13 @@ def standardize_time_slots(data_frame: pd.DataFrame) -> pd.DataFrame:
         ignore_index=True
     )
 
-def generate_class_schedules(faculty_schedules: Dict[str, Dict[str, List[Dict[str, Any]]]]) -> Dict[str, pd.DataFrame]:
-    """Creates individual timetable DataFrames for each class division."""
+def generate_class_schedules(faculty_schedules: Dict[str, Dict[str, List[Dict[str, Any]]]], parse_errors: Optional[List[str]] = None) -> Dict[str, pd.DataFrame]:
     division_tables: Dict[str, List[Dict[str, Any]]] = {}
     semester_divisions: Dict[int, Set[str]] = {}
+
+    # Ensure parse_errors is a list if provided, or initialize it
+    if parse_errors is None:
+        parse_errors = []
 
     # First pass: collect all unique divisions per semester
     for faculty_name, faculty_schedule_by_day in faculty_schedules.items():
@@ -288,60 +312,74 @@ def generate_class_schedules(faculty_schedules: Dict[str, Dict[str, List[Dict[st
             for session_entry in sessions:
                 parsed_subject_info = session_entry.get('parsed_subject_info')
 
-                if parsed_subject_info and parsed_subject_info['semester'] is not None:
-                    semester = parsed_subject_info['semester']
-                    
-                    if semester not in semester_divisions:
-                        semester_divisions[semester] = set()
-                    
-                    # Collect individual divisions excluding 'ALL'
-                    for db_entry in parsed_subject_info.get('division_batches', []):
-                        division_letter = db_entry.get('division')
-                        if division_letter and division_letter != 'ALL':
-                            semester_divisions[semester].add(division_letter)
-    
+                if (
+                    not isinstance(parsed_subject_info, dict)
+                    or 'semester' not in parsed_subject_info
+                    or parsed_subject_info['semester'] is None
+                ):
+                    if isinstance(parsed_subject_info, dict) and 'error' in parsed_subject_info:
+                        # Log the error and add to the list
+                        error_message = f"Error parsing subject info for faculty {faculty_name}, day {day}: {parsed_subject_info['error']}"
+                        print(f"[Parse Error] {error_message}") # Keep the logging intact
+                        parse_errors.append(error_message)
+                    continue
+
+                semester = parsed_subject_info['semester']
+
+                if semester not in semester_divisions:
+                    semester_divisions[semester] = set()
+
+                for db_entry in parsed_subject_info.get('division_batches', []):
+                    division_letter = db_entry.get('division')
+                    if division_letter and division_letter != 'ALL':
+                        semester_divisions[semester].add(division_letter)
+
     # Second pass: populate division tables
     for faculty_name, faculty_schedule_by_day in faculty_schedules.items():
         for day, sessions in faculty_schedule_by_day.items():
             for session_entry in sessions:
                 parsed_subject_info = session_entry.get('parsed_subject_info')
-                
-                if parsed_subject_info and parsed_subject_info['semester'] is not None:
-                    semester = parsed_subject_info['semester']
-                    target_division_batch_entries: List[Dict[str, Optional[str]]] = []
-                    
-                    session_division_batches = parsed_subject_info.get('division_batches', [])
 
-                    # Handle 'ALL' divisions by expanding to all known divisions
-                    if session_division_batches and session_division_batches[0].get('division') == 'ALL':
-                        if semester in semester_divisions:
-                            for div in sorted(list(semester_divisions[semester])):
-                                target_division_batch_entries.append({'division': div, 'batch': None})
-                    else:
-                        target_division_batch_entries = session_division_batches
-                    
-                    # Add session to each relevant division's timetable
-                    for db_entry in target_division_batch_entries:
-                        division = db_entry.get('division')
-                        batch = db_entry.get('batch')
-                        
-                        if division:
-                            division_key = f"{semester}{division}"
-                            
-                            if division_key not in division_tables:
-                                division_tables[division_key] = []
-                            
-                            entry = {
-                                'Subject': parsed_subject_info.get('subject_code'),
-                                'Type': session_entry.get('type'),
-                                'Batch': batch if batch is not None else '-',
-                                'Day': day,
-                                'Time_Slot': session_entry.get('time_slot'),
-                                'Faculty': faculty_name
-                            }
-                            
-                            division_tables[division_key].append(entry)
-    
+                if (
+                    not isinstance(parsed_subject_info, dict)
+                    or 'semester' not in parsed_subject_info
+                    or parsed_subject_info['semester'] is None
+                ):
+                    continue
+
+                semester = parsed_subject_info['semester']
+                target_division_batch_entries: List[Dict[str, Optional[str]]] = []
+
+                session_division_batches = parsed_subject_info.get('division_batches', [])
+
+                if session_division_batches and session_division_batches[0].get('division') == 'ALL':
+                    if semester in semester_divisions:
+                        for div in sorted(list(semester_divisions[semester])):
+                            target_division_batch_entries.append({'division': div, 'batch': None})
+                else:
+                    target_division_batch_entries = session_division_batches
+
+                for db_entry in target_division_batch_entries:
+                    division = db_entry.get('division')
+                    batch = db_entry.get('batch')
+
+                    if division:
+                        division_key = f"{semester}{division}"
+
+                        if division_key not in division_tables:
+                            division_tables[division_key] = []
+
+                        entry = {
+                            'Subject': parsed_subject_info.get('subject_code'),
+                            'Type': session_entry.get('type'),
+                            'Batch': batch if batch is not None else '-',
+                            'Day': day,
+                            'Time_Slot': session_entry.get('time_slot'),
+                            'Faculty': faculty_name
+                        }
+
+                        division_tables[division_key].append(entry)
+
     # Convert to DataFrames and apply formatting
     final_division_dataframes: Dict[str, pd.DataFrame] = {}
     for division_key, entries_list in division_tables.items():
@@ -350,16 +388,20 @@ def generate_class_schedules(faculty_schedules: Dict[str, Dict[str, List[Dict[st
             final_division_dataframes[division_key] = standardize_time_slots(data_frame)
         else:
             final_division_dataframes[division_key] = pd.DataFrame(columns=['Subject', 'Type', 'Batch', 'Day', 'Time_Slot', 'Faculty'])
-    
+
     return final_division_dataframes
 
-def process_all_timetables(matrix_file_path: str) -> Dict[str, Dict[str, List[Dict[str, Any]]]]:
+def process_all_timetables(matrix_file_path: str, errors: Optional[List[str]] = None) -> Dict[str, Dict[str, List[Dict[str, Any]]]]:
     """Loads Excel workbook, processes each sheet, and consolidates faculty schedules."""
+    if errors is None:
+        errors = []
     try:
         workbook = openpyxl.load_workbook(matrix_file_path)
     except FileNotFoundError:
+        errors.append(f"Error: Timetable file not found at {matrix_file_path}")
         return {}
-    except Exception:
+    except Exception as e:
+        errors.append(f"Error loading Excel workbook: {str(e)}")
         return {}
 
     all_faculty_schedules: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
@@ -368,18 +410,21 @@ def process_all_timetables(matrix_file_path: str) -> Dict[str, Dict[str, List[Di
     for sheet_name in workbook.sheetnames:
         processed_data_frame = extract_sheet_data(workbook, sheet_name)
         
-        if not processed_data_frame.empty:
-            sheet_schedules = build_faculty_schedules(
-                processed_data_frame
-            )
-            
-            # Merge schedules from current sheet into consolidated schedules
-            for faculty_name, schedule_by_day in sheet_schedules.items():
-                if faculty_name not in all_faculty_schedules:
-                    all_faculty_schedules[faculty_name] = schedule_by_day
-                else:
-                    for day_name in schedule_by_day:
-                        all_faculty_schedules[faculty_name][day_name].extend(schedule_by_day[day_name])
+        if processed_data_frame.empty:
+            errors.append(f"Warning: No valid data extracted from sheet '{sheet_name}'. It might be empty or malformed.")
+            continue
+
+        sheet_schedules = build_faculty_schedules(
+            processed_data_frame
+        )
+        
+        # Merge schedules from current sheet into consolidated schedules
+        for faculty_name, schedule_by_day in sheet_schedules.items():
+            if faculty_name not in all_faculty_schedules:
+                all_faculty_schedules[faculty_name] = schedule_by_day
+            else:
+                for day_name in schedule_by_day:
+                    all_faculty_schedules[faculty_name][day_name].extend(schedule_by_day[day_name])
 
     # Sort schedule entries by time slot for each faculty and day
     for faculty_name, schedule_by_day in all_faculty_schedules.items():
@@ -466,7 +511,8 @@ def build_hierarchical_schedule(condensed_division_tables: Dict[str, pd.DataFram
 def run_matrix_pipeline(matrix_file_path: str, department: str, college: str = "LDRP-ITR") -> Dict[str, Any]:
     """
     Orchestrates the entire timetable processing pipeline to generate a final
-    hierarchical dictionary of consolidated timetable information.
+    hierarchical dictionary of consolidated timetable information, along with
+    processing status and any encountered errors.
 
     This function calls a sequence of sub-functions to:
     1. Load and process Excel data into faculty-wise schedules.
@@ -480,28 +526,57 @@ def run_matrix_pipeline(matrix_file_path: str, department: str, college: str = "
         college (str, optional): The name of the college. Defaults to "LDRP-ITR".
 
     Returns:
-        Dict[str, Any]: A nested dictionary containing the organized timetable data
-                        grouped by college, department, semester, division, and subject.
-                        Returns an empty dictionary if any step in the pipeline fails
-                        to produce valid data.
+        Dict[str, Any]: A dictionary containing two keys:
+                        - 'results': A nested dictionary containing the organized timetable data
+                                     grouped by college, department, semester, division, and subject.
+                                     Returns an empty dictionary if any step in the pipeline fails
+                                     to produce valid data.
+                        - 'status': A dictionary with processing status information:
+                                    - 'success': True if the pipeline completed successfully, False otherwise.
+                                    - 'message': A brief message about the processing outcome.
+                                    - 'errors': A list of error/warning messages encountered during processing.
     """
+    processing_errors: List[str] = []
+    final_dict = {}
+
     # Step 1: Generate full faculty schedules
-    all_faculty_schedules = process_all_timetables(matrix_file_path)
+    all_faculty_schedules = process_all_timetables(matrix_file_path, errors=processing_errors)
     
     if not all_faculty_schedules:
-        return {}
+        return {
+            "results": {},
+            "status": {
+                "success": False,
+                "message": "Failed to extract any faculty schedules. Please check the input file.",
+                "errors": processing_errors
+            }
+        }
 
     # Step 2: Create division-specific timetables
-    division_tables = generate_class_schedules(all_faculty_schedules)
+    division_tables = generate_class_schedules(all_faculty_schedules, parse_errors=processing_errors)
     
     if not division_tables:
-        return {}
+        return {
+            "results": {},
+            "status": {
+                "success": False,
+                "message": "Failed to generate division-specific timetables. This might be due to parsing errors or missing data.",
+                "errors": processing_errors
+            }
+        }
 
     # Step 3: Condense division timetables
     condensed_division_tables = get_division_course_catalog(division_tables)
     
     if not condensed_division_tables:
-        return {}
+        return {
+            "results": {},
+            "status": {
+                "success": False,
+                "message": "Failed to condense division timetables. No valid course catalog could be generated.",
+                "errors": processing_errors
+            }
+        }
 
     # Step 4: Create final hierarchical dictionary
     final_dict = build_hierarchical_schedule(
@@ -510,4 +585,27 @@ def run_matrix_pipeline(matrix_file_path: str, department: str, college: str = "
         college=college
     )
     
-    return final_dict
+    if not final_dict:
+        return {
+            "results": {},
+            "status": {
+                "success": False,
+                "message": "Failed to build the final hierarchical schedule. The output structure is empty.",
+                "errors": processing_errors
+            }
+        }
+    
+    # If we reach here, it means the pipeline completed, even if there were some warnings/errors
+    status_message = "Timetable processed successfully."
+    
+    if processing_errors:
+        status_message = "Timetable processed with warnings/errors."
+
+    return {
+        "results": final_dict,
+        "status": {
+            "success": not bool(processing_errors), # True if no errors, False if any errors
+            "message": status_message,
+            "errors": processing_errors
+        }
+    }
