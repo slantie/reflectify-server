@@ -114,7 +114,7 @@ def extract_subject_details(subject_string: str) -> Optional[Dict[str, Any]]:
 
     # Step 2: Identify subject code (all alphabets, usually 2-4 letters)
     for token in tokens:
-        if re.match(r'^[A-Z]{2,5}$', token, re.IGNORECASE):
+        if re.match(r'^[A-Z&]{2,6}$', token, re.IGNORECASE):
             subject_code = token.strip().upper()
             break
 
